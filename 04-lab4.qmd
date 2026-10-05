@@ -3,3 +3,117 @@ title: "04-lab4"
 format: html
 ---
 
+```{r, include=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+BiocManager::install(c("clusterProfiler", "EnhancedVolcano"))
+BiocManager::install("DESeq2")
+BiocManager::install(c("edgeR", "sytemPipeR", "org.At.tair.db"))
+
+if (!requireNamespace("remotes", quietly = TRUE)) {
+    install.packages("remotes")
+}
+remotes::install_github("tgirke/systemPipeRdata", lib = "data", build = TRUE, force = TRUE, upgrade = "never")
+
+lapply(c(
+  "docopt", "DT", "pheatmap", "GenomicFeatures", "DESeq2",
+  "edgeR", "systemPipeR", "systemPipeRdata", "BiocStyle", "GO.db", "dplyr",
+  "tidyr", "stringr", "Rqc", "QuasR", "ape", "clusterProfiler", "biomaRt", "EnhancedVolcano", "org.At.tair.db"
+), require, character.only = TRUE)
+
+fq_path <- systemPipeRdata::pathList()$fastqdir
+fq_files <- list.files(fq_path)
+head(fq_files)
+```
+
+## Q1
+```{r}
+meta_data <- read.table(
+     system.file("extdata/param/targetsPE.txt", package="systemPipeRdata"), 
+     header = TRUE)
+
+meta <- lapply(meta_data, function(x) gsub("./data/", fq_path, x))
+library(data.table)
+meta <- as.data.table(meta)
+DT::datatable(meta)
+```
+
+
+## Q2
+```{r, message=FALSE}
+library(Rqc)
+qc <- rqc(path = fq_path, pattern = ".fastq.gz", openBrowser=FALSE, outdir="outputs")
+
+rqcCycleQualityBoxPlot(qc[1:12]) + theme(strip.background = element_rect(fill = "lightblue"))
+rqcCycleQualityBoxPlot(qc[13:24]) + theme(strip.background = element_rect(fill = "lightblue"))
+rqcCycleQualityBoxPlot(qc[25:36]) + theme(strip.background = element_rect(fill = "lightblue"))
+
+
+rqcCycleBaseCallsLinePlot(qc[1:12]) + theme(strip.background = element_rect(fill = "lightblue"))
+rqcCycleBaseCallsLinePlot(qc[13:24]) + theme(strip.background = element_rect(fill = "lightblue"))
+rqcCycleBaseCallsLinePlot(qc[25:36]) + theme(strip.background = element_rect(fill = "lightblue"))
+```
+
+## Q3
+```{r, message=FALSE}
+library(stringr)
+library(QuasR)
+files1 <- meta$FileName1
+files2 <- meta$FileName2
+dir.create("outputs/processedFastq", recursive = TRUE)
+out_files1 <- paste0("outputs/processedFastq/processed_", basename(files1))
+out_files2 <- paste0("outputs/processedFastq/processed_", basename(files2))
+preprocessReads(files1, out_files1, nBases = 1, 
+                truncateEndBases = 3, 
+                Lpattern = "GCCCGGGTAA")
+preprocessReads(files2, out_files2, nBases = 1, 
+                truncateEndBases = 3, 
+                Lpattern = "GCCCGGGTAA")
+meta$FileName1 <- out_files1
+meta$FileName2 <- out_files2
+```
+
+## Q4
+```{r, eval=FALSE}
+dir.create("outputs/sam_files", recursive = TRUE)
+dir.create("outputs/bam_files", recursive = TRUE)
+
+out_files1 <- str_remove_all(out_files1, ".gz")
+out_files2 <- str_remove_all(out_files2, ".gz")
+meta$FileName1 <- out_files1
+meta$FileName2 <- out_files2
+
+files <- meta$FileName1
+samp_names <- meta$SampleName
+tryCatch({
+  for (i in seq_along(files)){
+    log1 <- system2(command = "hisat2",
+            args = c("-x", "outputs/hisat2_index/tair10_1_index", 
+                     files[i], "-p", "8", "-S", 
+                     paste0("outputs/sam_files/", samp_names[i], ".sam")),
+            stdout = TRUE, stderr = TRUE)
+    
+    
+    log2 <- system2(command = "samtools",
+            args = c("view", "-bS", paste0("outputs/sam_files/", samp_names[i], ".sam"),
+                     ">", paste0("outputs/bam_files/", samp_names[i], ".bam")),
+            stdout = TRUE, stderr = TRUE)
+    
+    log3 <- system2(command = "samtools",
+            args = c("sort", paste0("outputs/bam_files/", samp_names[i], ".bam"), "-o",
+                     paste0("outputs/bam_files/", samp_names[i], ".sorted.bam")),
+            stdout = TRUE, stderr = TRUE)
+    
+    log4 <- system2(command = "samtools",
+            args = c("index", paste0("outputs/bam_files/", samp_names[i], ".sorted.bam")),
+            stdout = TRUE, stderr = TRUE)
+    logs <- c(log1,log2,log3,log4)
+    writeLines(logs, paste0("outputs/bam_files/", samp_names[i], "_hisat2.log"))
+  }
+}, error = function(e){
+  paste("hisat2", "error:", e$message)
+})
+
+
+```
