@@ -10,11 +10,12 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
 BiocManager::install(c("clusterProfiler", "EnhancedVolcano"))
 BiocManager::install("DESeq2")
 BiocManager::install(c("edgeR", "sytemPipeR", "org.At.tair.db"))
+BiocManager::install("systemPipeRData")
 
-if (!requireNamespace("remotes", quietly = TRUE)) {
-    install.packages("remotes")
-}
-remotes::install_github("tgirke/systemPipeRdata", lib = "data", build = TRUE, force = TRUE, upgrade = "never")
+#if (!requireNamespace("remotes", quietly = TRUE)) {
+#    install.packages("remotes")
+#}
+#remotes::install_github("tgirke/systemPipeRdata", lib = "data", build = TRUE, force = TRUE, upgrade = "never")
 
 lapply(c(
   "docopt", "DT", "pheatmap", "GenomicFeatures", "DESeq2",
@@ -117,3 +118,237 @@ tryCatch({
 
 
 ```
+
+
+```{r, include=FALSE}
+hisat2_logs_dir <- "outputs/bam_files"
+log_files <- list.files(hisat2_logs_dir, pattern = "_hisat2\\.log$", full.names = TRUE)
+
+if(length(log_files) > 0) {
+  percent_aligned <- 1:length(log_files)
+
+  for (i in seq_along(percent_aligned)) {
+    percent_aligned[i] <- readLines(log_files[i])[length(readLines(log_files[i]))]
+  }
+
+  align_df <- data.frame(samplename = sort(meta_data$SampleName), percent_aligned)
+  align_df <- align_df %>% 
+    mutate(percent_aligned = as.numeric(stringr::str_split_i(align_df$percent_aligned, "%", 1))) 
+  
+  head(align_df)
+} else {
+  print("No HISAT2 log files found yet. Run the alignment step first.")
+}
+```
+
+
+## Q5
+```{r}
+DT::datatable(align_df)
+
+ggplot(align_df, mapping = aes(y=percent_aligned)) + 
+  geom_boxplot()
+```
+
+
+
+```{r, include = FALSE}
+bfiles <- list.files("outputs/bam_files", pattern = ".sorted.bam$", full.names = TRUE)
+
+BiocManager::install("Rsubread")
+library(Rsubread)
+
+gene_count_list <- Rsubread::featureCounts(
+                        files = bfiles, 
+                        annot.ext = "data/GCF_000001735.4_TAIR10.1_genomic.gtf", 
+                        isGTFAnnotationFile = TRUE, 
+                        allowMultiOverlap = FALSE,  
+                        isPairedEnd = FALSE, nthreads = 8,
+                        minMQS = 10, 
+                        GTF.featureType = "exon",  
+                        GTF.attrType = "gene_id" 
+                        )
+
+if(exists("gene_count_list")) {
+  glimpse(gene_count_list$counts)[1:5,1:5]
+}
+
+if(exists("gene_count_list")) {
+  glimpse(gene_count_list$annotation)[1:5,]
+}
+
+if(exists("gene_count_list")) {
+  glimpse(gene_count_list$stat)[,1:5]
+}
+```
+
+## Q6
+```{r}
+count_table <- gene_count_list$counts
+cols <- lapply(colnames(count_table), function(x) str_remove(x, ".sorted.bam"))
+colnames(count_table) <- cols
+
+count_table <- count_table[rowSums(count_table) > 0,]
+
+DT::datatable(count_table)
+```
+
+
+```{r, include=FALSE}
+if(exists("count_table")) {
+  coldata <- meta_data %>% dplyr::select(SampleName,SampleLong,Factor) %>% 
+    dplyr::mutate(SampleLong=str_split_i(SampleLong, "\\.",1)) %>% 
+    dplyr::rename(condition = SampleLong) %>%
+    dplyr::mutate(condition = factor(condition)) %>% 
+    dplyr::mutate(Factor = factor(Factor)) 
+    
+  base::rownames(coldata) <- coldata$SampleName
+  coldata <- coldata %>% mutate(SampleName = factor(SampleName))
+  coldata$type <- factor(rep("single-read", nrow(coldata)))
+
+  coldata <- coldata[base::match(base::colnames(count_table), rownames(coldata)),]
+
+  dds1 <- DESeqDataSetFromMatrix(countData = count_table,
+                                colData = coldata,
+                                design = ~ condition)
+
+  dds2 <- DESeqDataSetFromMatrix(countData = count_table,
+                                colData = coldata,
+                                design = ~ Factor)
+}
+
+
+if(exists("dds1")) {
+  d <- cor(assay(rlog(dds1)), method = "spearman")
+  hc <- hclust(dist(1 - d))
+
+  plot.phylo(as.phylo(hc), type = "p", edge.col = "blue", edge.width = 2,
+               show.node.label = TRUE, no.margin = TRUE)
+}
+
+
+if(exists("dds1")) {
+  dds1_results <- DESeq(dds1)
+  dds2_results <- DESeq(dds2)
+
+  res1 <- DESeq2::results(dds1_results)
+  res2 <- DESeq2::results(dds2_results)
+}
+
+
+
+
+if(exists("dds1_results")) {
+  res_vir_mock <- DESeq2::results(dds1_results, contrast = c("condition", "Vir", "Mock"), alpha = 0.2)
+  res_avr_mock <- DESeq2::results(dds1_results, contrast = c("condition", "Avr", "Mock"), alpha = 0.2)
+  res_vir_avr <- DESeq2::results(dds1_results, contrast = c("condition", "Vir", "Avr"), alpha = 0.2)
+
+  filter_and_count <- function(res_obj, comparison_name, fc_threshold = 2) {
+    res_filtered <- res_obj[!is.na(res_obj$padj) & !is.na(res_obj$log2FoldChange), ]
+    sig_genes <- res_filtered[abs(res_filtered$log2FoldChange) >= log2(fc_threshold), ]
+    up_regulated <- sum(sig_genes$log2FoldChange > 0)
+    down_regulated <- sum(sig_genes$log2FoldChange < 0)
+    
+    return(data.frame(
+      Comparison = comparison_name,
+      Up_regulated = up_regulated,
+      Down_regulated = down_regulated
+    ))
+  }
+
+  results_summary <- rbind(
+    filter_and_count(res_vir_mock, "Vir vs Mock"),
+    filter_and_count(res_avr_mock, "Avr vs Mock"),
+    filter_and_count(res_vir_avr, "Vir vs Avr")
+  )
+
+  print(results_summary)
+
+  plot_data <- results_summary %>%
+    pivot_longer(cols = c(Up_regulated, Down_regulated), 
+                 names_to = "Regulation", 
+                 values_to = "Count") %>%
+    mutate(Regulation = factor(Regulation, levels = c("Up_regulated", "Down_regulated")))
+
+  p <- ggplot(plot_data, aes(x = Comparison, y = Count, fill = Regulation)) +
+    geom_bar(stat = "identity", position = "stack") +
+    coord_flip() +  
+    labs(
+      title = "Differentially Expressed Genes by Comparison",
+      subtitle = "Fold Change >= 2, alpha = 0.2",
+      x = "Comparison",
+      y = "Number of Genes",
+      fill = "Regulation"
+    ) +
+    theme_minimal() 
+  print(p)
+}
+```
+
+
+## Q7
+```{r}
+comp <- systemPipeR::readComp(system.file("extdata/param/targetsPE.txt", package="systemPipeRdata"))
+comps <- comp[[1]]
+
+results_list <- lapply(comps, function(x){
+  condits <- str_split(x, "-")[[1]]
+  DESeq2::results(dds2_results, contrast = c("Factor", condits[1], condits[2]), alpha = 0.2)
+})
+names(results_list) <- comps
+
+results_summary <- do.call(rbind, lapply(names(results_list), function(x) {
+  filter_and_count(results_list[[x]], x)
+}))
+
+print(results_summary)
+
+plot_data <- results_summary %>%
+    pivot_longer(cols = c(Up_regulated, Down_regulated), 
+                 names_to = "Regulation", 
+                 values_to = "Count") %>%
+    mutate(Regulation = factor(Regulation, levels = c("Up_regulated", "Down_regulated")))
+
+  p <- ggplot(plot_data, aes(x = Comparison, y = Count, fill = Regulation)) +
+    geom_bar(stat = "identity", position = "stack") +
+    coord_flip() +  
+    labs(
+      title = "Differentially Expressed Genes by Comparison",
+      subtitle = "Fold Change >= 2, alpha = 0.2",
+      x = "Comparison",
+      y = "Number of Genes",
+      fill = "Regulation"
+    ) +
+    theme_minimal() 
+  print(p)
+```
+
+```{r, inculde = FALSE, eval=FALSE}
+if(exists("res_vir_mock") && exists("desc")) {
+  annotate_results <- function(res_obj, desc_df) {
+    res_df <- as.data.frame(res_obj)
+    res_df$gene_id <- rownames(res_df)
+    res_df <- left_join(res_df, desc_df, by = "gene_id") %>%
+      mutate(description = str_split_i(description,"\\[",1)) 
+    return(res_df)
+  }
+
+  res_vir_mock_annot <- annotate_results(res_vir_mock, desc)
+  res_avr_mock_annot <- annotate_results(res_avr_mock, desc)
+  res_vir_avr_annot <- annotate_results(res_vir_avr, desc)
+
+  volcano1 <- EnhancedVolcano(res_vir_mock_annot,
+                             lab = res_vir_mock_annot$description,
+                             x = 'log2FoldChange',
+                             y = 'pvalue',
+                             title = 'Vir vs Mock',
+                             pCutoff = 0.05,           
+                             FCcutoff = 1.0,
+                             pointSize = 4.0,
+                             labSize = 4.0,
+                             drawConnectors = TRUE)
+  print(volcano1)
+}
+
+```
+
