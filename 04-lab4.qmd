@@ -29,7 +29,7 @@ head(fq_files)
 ```
 
 ## Q1
-```{r}
+```{r, message=FALSE}
 meta_data <- read.table(
      system.file("extdata/param/targetsPE.txt", package="systemPipeRdata"), 
      header = TRUE)
@@ -62,28 +62,31 @@ library(stringr)
 library(QuasR)
 files1 <- meta$FileName1
 files2 <- meta$FileName2
-dir.create("outputs/processedFastq", recursive = TRUE)
 out_files1 <- paste0("outputs/processedFastq/processed_", basename(files1))
 out_files2 <- paste0("outputs/processedFastq/processed_", basename(files2))
+meta$FileName1 <- out_files1
+meta$FileName2 <- out_files2
+```
+```{r, eval=FALSE}
+dir.create("outputs/processedFastq", recursive = TRUE)
 preprocessReads(files1, out_files1, nBases = 1, 
                 truncateEndBases = 3, 
                 Lpattern = "GCCCGGGTAA")
 preprocessReads(files2, out_files2, nBases = 1, 
                 truncateEndBases = 3, 
                 Lpattern = "GCCCGGGTAA")
-meta$FileName1 <- out_files1
-meta$FileName2 <- out_files2
 ```
 
 ## Q4
-```{r, eval=FALSE}
-dir.create("outputs/sam_files", recursive = TRUE)
-dir.create("outputs/bam_files", recursive = TRUE)
-
+```{r}
 out_files1 <- str_remove_all(out_files1, ".gz")
 out_files2 <- str_remove_all(out_files2, ".gz")
 meta$FileName1 <- out_files1
 meta$FileName2 <- out_files2
+```
+```{r, eval=FALSE}
+dir.create("outputs/sam_files", recursive = TRUE)
+dir.create("outputs/bam_files", recursive = TRUE)
 
 files <- meta$FileName1
 samp_names <- meta$SampleName
@@ -291,19 +294,19 @@ if(exists("dds1_results")) {
 comp <- systemPipeR::readComp(system.file("extdata/param/targetsPE.txt", package="systemPipeRdata"))
 comps <- comp[[1]]
 
-results_list <- lapply(comps, function(x){
+results_list2 <- lapply(comps, function(x){
   condits <- str_split(x, "-")[[1]]
   DESeq2::results(dds2_results, contrast = c("Factor", condits[1], condits[2]), alpha = 0.2)
 })
-names(results_list) <- comps
+names(results_list2) <- comps
 
-results_summary <- do.call(rbind, lapply(names(results_list), function(x) {
-  filter_and_count(results_list[[x]], x)
+results_summary2 <- do.call(rbind, lapply(names(results_list2), function(x) {
+  filter_and_count(results_list2[[x]], x)
 }))
 
-print(results_summary)
+print(results_summary2)
 
-plot_data <- results_summary %>%
+plot_data <- results_summary2 %>%
     pivot_longer(cols = c(Up_regulated, Down_regulated), 
                  names_to = "Regulation", 
                  values_to = "Count") %>%
@@ -322,8 +325,20 @@ plot_data <- results_summary %>%
     theme_minimal() 
   print(p)
 ```
+## Q8
+The clustered heatmap in the manual does not show very similar clustering to my previous spearman plot, although my spearman plot was not exactly the same as the one in the manual to begin with.
 
-```{r, inculde = FALSE, eval=FALSE}
+
+```{r, include=FALSE}
+desc <- AnnotationDbi::select(org.At.tair.db,                            
+                                  keys = rownames(res_vir_mock),             
+                                  columns = c("GENENAME"),                   
+                                  keytype = "TAIR") %>%                      
+      dplyr::rename(gene_id = TAIR, description = GENENAME) %>%              
+      dplyr::distinct(gene_id, .keep_all = TRUE)
+```
+
+```{r, echo = FALSE, message=FALSE}
 if(exists("res_vir_mock") && exists("desc")) {
   annotate_results <- function(res_obj, desc_df) {
     res_df <- as.data.frame(res_obj)
@@ -352,3 +367,27 @@ if(exists("res_vir_mock") && exists("desc")) {
 
 ```
 
+
+## Q9
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+sig_avr_up <- res_avr_mock %>%
+  as.data.frame() %>%
+  dplyr::filter(pvalue < 0.05 & log2FoldChange > 1) %>%
+  rownames()
+
+# Run the enrichment using TAIR IDs
+ego_avr <- enrichGO(gene          = sig_avr_up,
+                    OrgDb         = org.At.tair.db,
+                    keyType       = "TAIR",
+                    ont           = "BP", # Biological Process
+                    pAdjustMethod = "none",
+                    pvalueCutoff  = 0.05,
+                    qvalueCutoff  = 0.2)
+
+# Visualize with a dotplot
+enrichplot::dotplot(ego_avr, showCategory=20) + 
+  ggplot2::ggtitle("GO Enrichment: Avirulent Response (Up-regulated)")
+
+```
+
+This plot shows that genes that respond to oomycetes, general defense, fungi, and stress only occur once each in our dataset. Only 1 gene per category is annotated with each label, based on the circle size. It also shows that response to oomycetes is the most significantly up-regulated of the categories, which suggests that avirulent P. syringae may be treated as an oomycete within the plant.
